@@ -1,5 +1,7 @@
 use std::ops;
 use std::collections::HashMap;
+use num_complex::Complex;
+// use num_traits::identities::Zero;
 
 type PositionValue = f32;
 type WavelengthValue = f32;
@@ -10,12 +12,12 @@ type RGBColor = [IntensityValue; 3];
 const MIN_WL: WavelengthValue = 380e-9;
 const MAX_WL: WavelengthValue = 750e-9;
 //const WL_STEP: WavelengthValue = 10e-9;
-const WLS_COUNT: usize = (750 - 380) / 10 + 1;
+const WLS_COUNT: usize = (750 - 380) / 5 + 1;
 
 type Spectrum = [IntensityValue; WLS_COUNT];
 
 fn index_to_wl(i: WavelengthIndex) -> WavelengthValue {
-    MIN_WL + (MAX_WL - MIN_WL) / ((WLS_COUNT - 1)as WavelengthValue) * (i as WavelengthValue)
+    MIN_WL + (MAX_WL - MIN_WL) / ((WLS_COUNT - 1) as WavelengthValue) * (i as WavelengthValue)
 }
 
 const EPS: PositionValue = 1e-4;
@@ -180,6 +182,81 @@ impl Mat3 {
     }
 }
 
+// r1 and r2 should be normalized and either both 'to' or both 'from' the hit point
+fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthValue, rad: PositionValue) -> IntensityValue {
+    let bl1 = b1.length();
+    let bl2 = b2.length();
+    // we assume that b1 and b2 are ortogonal, so that
+    // ||j*b1 + k*b2||= |j| * ||b1|| + |k| * ||b2||
+    
+    let dot1 = b1.dot(&(r1 + r2));
+    let dot2 = b2.dot(&(r1 + r2));
+    
+    let mut count = 1;
+
+    // TODO: due to symmetry (+/-), the wave is always real;
+    // so we can only compute cos instead of cis
+
+    // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
+    let mut wave = Complex::<IntensityValue>::new(1.0, 0.0);
+
+    let mut add_at = |j, k| {
+        let spacial_dist = j * dot1 + k * dot2;
+        let phase = std::f32::consts::FRAC_2_PI * spacial_dist / wl;
+        wave += Complex::<IntensityValue>::cis(phase);
+        count += 1;
+    };
+
+    {
+        let mut j = 1.0;
+        while j as PositionValue * bl1 <= rad {
+            let mut k = 0.0;
+            while j * bl1 + k * bl2 <= rad {
+                add_at(j, k);
+                add_at(k, -j);
+                add_at(-j, -k);
+                add_at(-k, j);
+                k += 1.0;
+            }
+            j += 1.0;
+        }
+    }
+
+    let i1 = (wave / count as IntensityValue).norm_sqr();
+    
+    let mut count2 = 1;
+
+    // TODO: due to symmetry (+/-), the wave is always real;
+    // so we can only compute cos instead of cis
+
+    // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
+    let mut wave2 = Complex::<IntensityValue>::new(0.0, 0.0);
+
+    let mut add_at2 = |j, k| {
+        let spacial_dist = j * dot1 + k * dot2;
+        let phase = std::f32::consts::FRAC_2_PI * spacial_dist / wl;
+        wave2 += Complex::<IntensityValue>::cis(phase);
+        count2 += 1;
+    };
+
+    {
+        let mut j = 0.5;
+        while j * bl1 <= rad {
+            let mut k = 0.5;
+            while j * bl1 + k * bl2 <= rad {
+                add_at2(j, k);
+                add_at2(k, -j);
+                add_at2(-j, -k);
+                add_at2(-k, j);
+                k += 1.0;
+            }
+            j += 1.0;
+        }
+    }
+    let i2 = (wave2 / count2 as IntensityValue).norm_sqr();
+    (i1 + i2) / 2.0
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Ray {
     origin: Vec3,
@@ -207,7 +284,7 @@ struct ShadowCheckRay {
 
 struct Triangle<'a> {
     verts: [(Vec3, Vec3); 3], // array 3 of (position, normal)
-    orientation: Vec3,
+    struct_center: Vec3,
     material: &'a dyn Material,
 }
 
@@ -302,7 +379,7 @@ impl Material for MatteMaterial {
             })
             .sum();
         let res = self.color[tr.wli] * total_light;
-        println!("matte: {res}");
+        //println!("matte: {res}");
         res
     }
 }
@@ -354,6 +431,66 @@ impl Material for MirrorMaterial {
         let res =
         self.diffusivity * total_light + (1.0 - self.absorbtion) * secondary_intensity;
         println!("mirror {res}");
+        res
+    }
+}
+
+struct DiffractiveMaterial {
+    shininess: IntensityValue,
+    diffusivity: IntensityValue,
+    absorbtion: IntensityValue,
+    d_rad: PositionValue,
+    d_perp: PositionValue,
+}
+
+impl Material for DiffractiveMaterial {
+    fn hit(
+        &self,
+        tri: &Triangle,
+        hit_pos: &Vec3,
+        tr: &TracedRay,
+        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
+        scene: &dyn Tracer,
+    ) -> IntensityValue {
+        let n = tri.normal_at_pos(hit_pos);
+        let b1 = (*hit_pos - tri.struct_center).normalized() * self.d_rad;
+        let b2 = n.cross(&(*hit_pos - tri.struct_center)).normalized() * self.d_perp;
+        let total_light: IntensityValue = in_lights
+            .filter_map(|(dir, int)| {
+                let dot = dir.dot(&n);
+                //println!("some light");
+                if dot > 0.0 {
+                    //println!("correct light");
+                    Some(11100.0 * int * diffraction_intensity(b1, b2, dir, -tr.ray.dir, index_to_wl(tr.wli), 100.0e-6))
+                    /*
+                    let a_cos1 = dir.dot(&n);
+                    let a_cos2_2 = (1.0 - (1.0 - cos1 * cos1).sqrt() + index_to_wl(tr.wli) / self.d).pow(2.0);
+                    let h = (dir - tr.ray.dir).normalized();
+                    Some(int * n.dot(&h).powf(self.shininess))
+                    */
+                } else {
+                    None
+                }
+            })
+            .sum();
+        let secondary_intensity = if tr.ttl > 0 {
+            let new_dir = tr.ray.dir - 2.0 * tr.ray.dir.dot(&n) * n;// - tr.ray.dir;
+            scene.trace(&TracedRay {
+                ray: Ray {
+                    origin: *hit_pos + EPS * new_dir,
+                    dir: new_dir,
+                },
+                ttl: tr.ttl - 1,
+                wli: tr.wli,
+            })
+        } else {
+            0.0
+        };
+        //dbg!(total_light);
+        //dbg!(secondary_intensity);
+        let res =
+        self.diffusivity * total_light + (1.0 - self.absorbtion) * secondary_intensity;
+        //println!("mirror {res}");
         res
     }
 }
@@ -444,7 +581,7 @@ impl Tracer for RTTracer<'_> {
                 let res =
                 tri.material
                     .hit(tri, &hit_pos, tr, &mut in_lights, self);
-                println!("mat hit {res}");
+                //println!("mat hit {res}");
                 res
             }
             None => {
@@ -597,11 +734,18 @@ fn construct_materials() -> Vec<Box<dyn Material>> {
         color: reddish
     });
     let mirror_mat = Box::new(MirrorMaterial {
-        shininess: 10.0,
+        shininess: 6.0,
         diffusivity: 0.01,
         absorbtion: 0.2
     });
-    vec![ reddish_mat, mirror_mat ]
+    let cd_mat = Box::new(DiffractiveMaterial {
+        shininess: 6.0,
+        diffusivity: 0.01,
+        absorbtion: 0.2,
+        d_rad: 1.5e-6,
+        d_perp: 3.0e-6,
+    });
+    vec![ reddish_mat, mirror_mat, cd_mat ]
 }
 
 fn construct_scene0<'a>(materials: &'a Vec<Box<dyn Material>>) -> Scene<'a> {
@@ -609,14 +753,14 @@ fn construct_scene0<'a>(materials: &'a Vec<Box<dyn Material>>) -> Scene<'a> {
         verts: [ (Vec3::new(0.0, -0.5, 1.0), Vec3::new(0.0, 1.0, -1.0).normalized()),
         (Vec3::new(-0.5, 0.5, 2.0), Vec3::new(0.0, 1.0, -1.0).normalized()),
         (Vec3::new(0.5, 0.5, 2.0), Vec3::new(0.0, 1.0, -1.0).normalized()) ],
-        orientation: Vec3::zero(),
+        struct_center: Vec3::zero(),
         material: &*materials[0]//&*reddish_mat
     };
     let mirror_tri = Triangle {
         verts: [ (Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 1.0, -1.0).normalized()),
         (Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, -1.0).normalized()),
         (Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 1.0, -1.0).normalized()) ],
-        orientation: Vec3::zero(),
+        struct_center: Vec3::zero(),
         material: &*materials[1]//mirror_mat
     };
     let main_light = DirectionalLight {
@@ -634,22 +778,22 @@ fn construct_scene1<'a>(materials: &'a Vec<Box<dyn Material>>) -> Scene<'a> {
         verts: [ (Vec3::new(0.0, 0.5, 1.0), Vec3::new(1.0, 0.0, -1.0).normalized()),
         (Vec3::new(-1.0, 0.5, 0.0), Vec3::new(1.0, 0.0, -1.0).normalized()),
         (Vec3::new(-0.5, -0.5, 0.5), Vec3::new(1.0, 0.0, -1.0).normalized()) ],
-        orientation: Vec3::zero(),
+        struct_center: Vec3::zero(),
         material: &*materials[0]//&*reddish_mat
     };
     let mirror_tri0 = Triangle {
         verts: [ (Vec3::new(0.0, 2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
         (Vec3::new(0.0, -2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
         (Vec3::new(2.0, 2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()) ],
-        orientation: Vec3::zero(),
-        material: &*materials[1]//mirror_mat
+        struct_center: Vec3::new(1.0, 0.0, 0.0),
+        material: &*materials[2]//mirror_mat
     };
     let mirror_tri1 = Triangle {
         verts: [ (Vec3::new(0.0, -2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
         (Vec3::new(2.0, 2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
         (Vec3::new(2.0, -2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()) ],
-        orientation: Vec3::zero(),
-        material: &*materials[1]//mirror_mat
+        struct_center: Vec3::new(1.0, 0.0, 0.0),
+        material: &*materials[2]//mirror_mat
     };
     let main_light = DirectionalLight {
         dir: Vec3::new(0.0, -0.0, 4.0).normalized(),
@@ -675,8 +819,8 @@ fn construct_camera() -> RTCamera {
         proj_v: Vec3::new(0.0, -1.0, 0.0),
         proj_w: 0.4,
         proj_h: 0.4,
-        pixel_w: 64,
-        pixel_h: 64
+        pixel_w: 128,
+        pixel_h: 128
     }
 }
 
