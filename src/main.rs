@@ -1,7 +1,7 @@
-use std::ops;
-use std::collections::HashMap;
 use num_complex::Complex;
+use std::collections::HashMap;
 use std::fs::read_to_string;
+use std::ops;
 
 type PositionValue = f32;
 type WavelengthValue = f32;
@@ -26,17 +26,15 @@ struct RGBColor {
 }
 
 impl RGBColor {
-    fn new(r: IntensityValue, g: IntensityValue, b: IntensityValue) -> Self {
-        Self {
-            data: [ r, g, b ]
-        }
+    const fn new(r: IntensityValue, g: IntensityValue, b: IntensityValue) -> Self {
+        Self { data: [r, g, b] }
     }
 
-    fn black() -> Self {
+    const fn black() -> Self {
         Self::new(0.0, 0.0, 0.0)
     }
 
-    fn gray(v: IntensityValue) -> Self {
+    const fn gray(v: IntensityValue) -> Self {
         Self::new(v, v, v)
     }
 }
@@ -46,7 +44,7 @@ impl ops::Add<RGBColor> for RGBColor {
 
     fn add(mut self, other: Self) -> RGBColor {
         for i in 0..3 {
-            self.data[i] += other.data[i]
+            self.data[i] += other.data[i];
         }
         self
     }
@@ -85,16 +83,12 @@ struct Vec3 {
 }
 
 impl Vec3 {
-    fn new(x: PositionValue, y: PositionValue, z: PositionValue) -> Self {
-        Self {
-            data: [ x, y, z ]
-        }
+    const fn new(x: PositionValue, y: PositionValue, z: PositionValue) -> Self {
+        Self { data: [x, y, z] }
     }
 
-    fn zero() -> Self {
-        Self {
-            data: [ 0.0; 3 ]
-        }
+    const fn zero() -> Self {
+        Self { data: [0.0; 3] }
     }
 
     fn dot(&self, other: &Self) -> PositionValue {
@@ -116,10 +110,7 @@ impl Vec3 {
     }
 
     fn length_sqr(&self) -> PositionValue {
-        self.data
-            .iter()
-            .map(|&a| a * a)
-            .sum::<PositionValue>()
+        self.data.iter().map(|&a| a * a).sum::<PositionValue>()
     }
 
     fn length(&self) -> PositionValue {
@@ -128,7 +119,7 @@ impl Vec3 {
 
     fn normalize(&mut self) {
         let length = self.length();
-        for a in self.data.iter_mut() {
+        for a in &mut self.data {
             *a /= length;
         }
     }
@@ -162,7 +153,7 @@ impl ops::Add<Vec3> for Vec3 {
 
     fn add(mut self, other: Self) -> Vec3 {
         for i in 0..3 {
-            self.data[i] += other.data[i]
+            self.data[i] += other.data[i];
         }
         self
     }
@@ -173,7 +164,7 @@ impl ops::Sub<Vec3> for Vec3 {
 
     fn sub(mut self, other: Self) -> Vec3 {
         for i in 0..3 {
-            self.data[i] -= other.data[i]
+            self.data[i] -= other.data[i];
         }
         self
     }
@@ -207,7 +198,7 @@ struct Mat3 {
 
 impl Mat3 {
     fn det(&self) -> PositionValue {
-        let res = (0..3)
+        (0..3)
             .map(|i| {
                 (0..3)
                     .map(|j| self.data[j][(i + j) % 3])
@@ -220,8 +211,7 @@ impl Mat3 {
                         .map(|j| self.data[j][(i + 3 - j) % 3])
                         .product::<PositionValue>()
                 })
-                .sum::<PositionValue>();
-        res
+                .sum::<PositionValue>()
     }
 
     fn solve(&self, b: &Vec3) -> Vec3 {
@@ -231,7 +221,7 @@ impl Mat3 {
                 .map(|i| {
                     let mut m = *self;
                     for j in 0..3 {
-                        m.data[j][i] = b.data[j]
+                        m.data[j][i] = b.data[j];
                     }
                     m.det() / my_det
                 })
@@ -244,15 +234,22 @@ impl Mat3 {
 
 // TODO add sample count per cell as an argument
 // r1 and r2 should be normalized and either both 'to' or both 'from' the hit point
-fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthValue, rad: PositionValue) -> IntensityValue {
+fn diffraction_intensity(
+    b1: Vec3,
+    b2: Vec3,
+    r1: Vec3,
+    r2: Vec3,
+    wl: WavelengthValue,
+    rad: PositionValue,
+) -> IntensityValue {
     let bl1 = b1.length();
     let bl2 = b2.length();
     // we assume that b1 and b2 are ortogonal, so that
     // ||j*b1 + k*b2||= |j| * ||b1|| + |k| * ||b2||
-    
+
     let dot1 = b1.dot(&(r1 + r2));
     let dot2 = b2.dot(&(r1 + r2));
-    
+
     let mut count = 1;
 
     // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
@@ -281,7 +278,7 @@ fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthV
     }
 
     let i1 = (wave / count as IntensityValue).norm_sqr();
-    
+
     let mut count2 = 1;
 
     // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
@@ -398,7 +395,13 @@ impl<'a> Triangle<'a> {
 */
 
 trait IntersectedObject {
-    fn shade(&self, scene: &dyn Tracer, receptor: &dyn LightReceptor, in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>, ray_ttl: i32) -> RGBColor;
+    fn shade(
+        &self,
+        scene: &dyn Tracer,
+        receptor: &dyn LightReceptor,
+        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
+        ray_ttl: i32,
+    ) -> RGBColor;
 }
 
 trait Object {
@@ -445,7 +448,8 @@ impl Object for CompactDiscObj {
     fn simple_intersect(&self, ray: &Ray) -> Option<PositionValue> {
         let (t, hit_pos) = self.intersect_disc_plane(ray);
         let r_sqr = (hit_pos - self.center).length_sqr();
-        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer {
+        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer
+        {
             Some(t)
         } else {
             None
@@ -455,12 +459,16 @@ impl Object for CompactDiscObj {
     fn intersect(&self, ray: &Ray) -> Option<(PositionValue, Box<dyn IntersectedObject + '_>)> {
         let (t, hit_pos) = self.intersect_disc_plane(ray);
         let r_sqr = (hit_pos - self.center).length_sqr();
-        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer {
-            Some((t, Box::new(IntersectedCompactDiscObj {
-                obj: self,
-                hit_pos,
-                in_dir: ray.dir,
-            })))
+        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer
+        {
+            Some((
+                t,
+                Box::new(IntersectedCompactDiscObj {
+                    obj: self,
+                    hit_pos,
+                    in_dir: ray.dir,
+                }),
+            ))
         } else {
             None
         }
@@ -468,17 +476,23 @@ impl Object for CompactDiscObj {
 }
 
 impl<'a> IntersectedObject for IntersectedCompactDiscObj<'a> {
-    fn shade(&self, tracer: &dyn Tracer, receptor: &dyn LightReceptor, in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>, ray_ttl: i32) -> RGBColor {
-
+    fn shade(
+        &self,
+        tracer: &dyn Tracer,
+        receptor: &dyn LightReceptor,
+        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
+        ray_ttl: i32,
+    ) -> RGBColor {
         let refl_color = if ray_ttl > 0 {
             let out_dir = self.in_dir - 2.0 * self.obj.normal.dot(&self.in_dir) * self.obj.normal;
-            (1.0 - self.obj.absorbtion) * tracer.trace(&TracedRay {
-                ray: Ray {
-                    dir: out_dir,
-                    origin: self.hit_pos + EPS * out_dir
-                },
-                ttl: ray_ttl - 1
-            })
+            (1.0 - self.obj.absorbtion)
+                * tracer.trace(&TracedRay {
+                    ray: Ray {
+                        dir: out_dir,
+                        origin: self.hit_pos + EPS * out_dir,
+                    },
+                    ttl: ray_ttl - 1,
+                })
         } else {
             RGBColor::black()
         };
@@ -493,12 +507,17 @@ impl<'a> IntersectedObject for IntersectedCompactDiscObj<'a> {
                 let n_dot = dir.dot(&self.obj.normal);
                 if n_dot > 0.0 {
                     let h = (dir - self.in_dir).normalized();
-                    let diffu = self.obj.diffusivity * RGBColor::gray(self.obj.normal.dot(&h).powf(self.obj.shininess));
-                    let spectrum = (0..WLS_COUNT).map(|wli| {
-                        let wl = index_to_wl(wli);
-                        // TODO add the number of samples parameter
-                        diffraction_intensity(b1, b2, dir, -self.in_dir, wl, self.obj.intg_rad)
-                    }).collect::<Vec<_>>().try_into().unwrap();
+                    let diffu = self.obj.diffusivity
+                        * RGBColor::gray(self.obj.normal.dot(&h).powf(self.obj.shininess));
+                    let spectrum = (0..WLS_COUNT)
+                        .map(|wli| {
+                            let wl = index_to_wl(wli);
+                            // TODO add the number of samples parameter
+                            diffraction_intensity(b1, b2, dir, -self.in_dir, wl, self.obj.intg_rad)
+                        })
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap();
                     let diffra = self.obj.diffraction_factor * receptor.process(&spectrum);
                     Some(int * (diffu + diffra))
                 } else {
@@ -553,9 +572,9 @@ struct Scene {
 
 impl Scene {
     fn is_obstructed(&self, scr: &ShadowCheckRay) -> bool {
-        self.objects.iter().any(|obj| match obj.simple_intersect(&scr.ray) {
-            Some(t) => t <= scr.light_t,
-            None => false,
+        self.objects.iter().any(|obj| {
+            obj.simple_intersect(&scr.ray)
+                .map_or(false, |t| t <= scr.light_t)
         })
     }
 }
@@ -571,35 +590,28 @@ impl Tracer for RTTracer<'_> {
         let mut closest: Option<Box<dyn IntersectedObject>> = None;
 
         for obj in &self.scene.objects {
-            match obj.intersect(&tr.ray) {
-                Some((t, iobj)) => {
-                    if t < closest_t {
-                        closest_t = t;
-                        closest = Some(iobj)
-                    }
+            if let Some((t, iobj)) = obj.intersect(&tr.ray) {
+                if t < closest_t {
+                    closest_t = t;
+                    closest = Some(iobj);
                 }
-                None => {}
             }
         }
 
-        match closest {
-            Some(iobj) => {
+        closest.map_or_else(RGBColor::black, |iobj| {
+            let hit_pos = tr.ray.at(closest_t);
 
-                let hit_pos = tr.ray.at(closest_t);
-
-                let mut in_lights = self.scene.lights.iter().filter_map(|l| {
-                    l.illuminate(hit_pos).and_then(|(scr, int)| {
-                        if self.scene.is_obstructed(&scr) {
-                            None
-                        } else {
-                            Some((scr.ray.dir, int))
-                        }
-                    })
-                });
-                iobj.shade(self, self.receptor, &mut in_lights, tr.ttl)
-            }
-            None => RGBColor::black()
-        }
+            let mut in_lights = self.scene.lights.iter().filter_map(|l| {
+                l.illuminate(hit_pos).and_then(|(scr, int)| {
+                    if self.scene.is_obstructed(&scr) {
+                        None
+                    } else {
+                        Some((scr.ray.dir, int))
+                    }
+                })
+            });
+            iobj.shade(self, self.receptor, &mut in_lights, tr.ttl)
+        })
     }
 }
 
@@ -640,7 +652,7 @@ struct RTLightReceptor {
 
 impl LightReceptor for RTLightReceptor {
     fn process(&self, spectrum: &Spectrum) -> RGBColor {
-        let rescolor = RGBColor {
+        RGBColor {
             data: (0..3)
                 .map(|i| {
                     self.receptors[i]
@@ -650,11 +662,10 @@ impl LightReceptor for RTLightReceptor {
                         .sum::<IntensityValue>()
                         * self.factor
                 })
-            .collect::<Vec<_>>()
+                .collect::<Vec<_>>()
                 .try_into()
-                .unwrap()
-        };
-        rescolor
+                .unwrap(),
+        }
     }
 }
 
@@ -679,7 +690,7 @@ struct RTCamera {
 
 impl Camera for RTCamera {
     fn render(&self, tracer: &dyn Tracer) -> RawImage {
-        let mut pixels = vec![ RGBColor::black(); (self.pixel_w * self.pixel_h) as usize ];
+        let mut pixels = vec![RGBColor::black(); (self.pixel_w * self.pixel_h) as usize];
 
         for y in 0..self.pixel_h {
             for x in 0..self.pixel_w {
@@ -689,7 +700,8 @@ impl Camera for RTCamera {
                     * self.proj_h;
                 let ray = Ray {
                     origin: self.pos,
-                    dir: (self.view_dir + coeff_u * self.proj_u + coeff_v * self.proj_v).normalized(),
+                    dir: (self.view_dir + coeff_u * self.proj_u + coeff_v * self.proj_v)
+                        .normalized(),
                 };
                 pixels[(y * self.pixel_h + x) as usize] = tracer.trace(&TracedRay { ray, ttl: 1 })
             }
@@ -711,24 +723,58 @@ struct RTImageWriter {}
 
 impl ImageWriter for RTImageWriter {
     fn write_image(image: RawImage, filename: &str) {
-        let bytes = image.pixels.iter().flat_map(|&rgb| rgb.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<_>>() ).collect::<Vec<_>>();
-        image::save_buffer(filename, bytes.as_slice(), image.width, image.height, image::ColorType::Rgb8).unwrap();
+        let bytes = image
+            .pixels
+            .iter()
+            .flat_map(|&rgb| {
+                rgb.data
+                    .iter()
+                    .map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        image::save_buffer(
+            filename,
+            bytes.as_slice(),
+            image.width,
+            image.height,
+            image::ColorType::Rgb8,
+        )
+        .unwrap();
     }
 }
 
 fn load_light_receptor(filename: &str) -> RTLightReceptor {
-    let rec_values = read_to_string(filename).unwrap().lines()
+    let rec_values = read_to_string(filename)
+        .unwrap()
+        .lines()
         .map(|s| {
             let parts = s.split(',').collect::<Vec<_>>();
-            (parts[0].parse::<i32>().unwrap(), (0..3).map(|i| parts[i + 1].parse::<IntensityValue>().unwrap()).collect::<Vec<_>>().try_into().unwrap())
-        }).collect::<HashMap<i32, [IntensityValue; 3]>>();
+            (
+                parts[0].parse::<i32>().unwrap(),
+                (0..3)
+                    .map(|i| parts[i + 1].parse::<IntensityValue>().unwrap())
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+        })
+        .collect::<HashMap<i32, [IntensityValue; 3]>>();
     RTLightReceptor {
-        receptors: (0..3).map(|i| {
-            (0..WLS_COUNT).map(|wli| {
-                let wlnm = (index_to_wl(wli) * 1e9).round() as i32;
-                rec_values.get(&wlnm).unwrap()[i]
-            }).collect::<Vec<_>>().try_into().unwrap()
-        }).collect::<Vec<_>>().try_into().unwrap(),
+        receptors: (0..3)
+            .map(|i| {
+                (0..WLS_COUNT)
+                    .map(|wli| {
+                        let wlnm = (index_to_wl(wli) * 1e9).round() as i32;
+                        rec_values.get(&wlnm).unwrap()[i]
+                    })
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap(),
         factor: 10.0,
     }
 }
@@ -767,16 +813,13 @@ fn construct_scene() -> Scene {
         intensity: 1.0,
     };
     Scene {
-        objects: vec! [ Box::new(cd1), Box::new(cd2) ],
-        lights: vec! [ Box::new(main_light) ],
+        objects: vec![Box::new(cd1), Box::new(cd2)],
+        lights: vec![Box::new(main_light)],
     }
 }
 
-fn construct_tracer<'a>(scene: &'a Scene, receptor: &'a dyn LightReceptor) -> Box::<dyn Tracer + 'a> {
-    Box::new(RTTracer {
-        scene,
-        receptor
-    })
+fn construct_tracer<'a>(scene: &'a Scene, receptor: &'a dyn LightReceptor) -> Box<dyn Tracer + 'a> {
+    Box::new(RTTracer { scene, receptor })
 }
 
 fn construct_camera() -> RTCamera {
