@@ -734,11 +734,25 @@ fn load_light_receptor(filename: &str) -> RTLightReceptor {
 }
 
 fn construct_scene() -> Scene {
-    let cd = CompactDiscObj {
-        center: Vec3::zero(),
-        normal: Vec3::new(0.85, -0.2, -1.0),
+    let cd1 = CompactDiscObj {
+        center: Vec3::new(-0.6, 0.0, 0.0),
+        normal: Vec3::new(1.0, 0.0, -1.0),
         r_inner: 0.2,
-        r_outer: 1.0,
+        r_outer: 0.7,
+        diffusivity: 0.1,
+        shininess: 5.0,
+        absorbtion: 0.1,
+        diffraction_factor: 0.5,
+        d_rad: 1.5e-6 * 2.0,
+        d_perp: 3.0e-6 * 2.0,
+        intg_rad: 50.0e-6,
+        intg_samples_per_cell: 1,
+    };
+    let cd2 = CompactDiscObj {
+        center: Vec3::new(0.6, 0.0, 0.0),
+        normal: Vec3::new(-1.0, 0.0, -1.0),
+        r_inner: 0.2,
+        r_outer: 0.7,
         diffusivity: 0.1,
         shininess: 5.0,
         absorbtion: 0.1,
@@ -753,7 +767,7 @@ fn construct_scene() -> Scene {
         intensity: 1.0,
     };
     Scene {
-        objects: vec! [ Box::new(cd) ],
+        objects: vec! [ Box::new(cd1), Box::new(cd2) ],
         lights: vec! [ Box::new(main_light) ],
     }
 }
@@ -773,8 +787,8 @@ fn construct_camera() -> RTCamera {
         proj_v: Vec3::new(0.0, -1.0, 0.0),
         proj_w: 0.4,
         proj_h: 0.4,
-        pixel_w: 128,
-        pixel_h: 128
+        pixel_w: 1024,
+        pixel_h: 1024,
     }
 }
 
