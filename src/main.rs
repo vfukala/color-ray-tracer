@@ -1,17 +1,15 @@
 use std::ops;
 use std::collections::HashMap;
 use num_complex::Complex;
-// use num_traits::identities::Zero;
+use std::fs::read_to_string;
 
 type PositionValue = f32;
 type WavelengthValue = f32;
 type WavelengthIndex = usize;
 type IntensityValue = f32;
-type RGBColor = [IntensityValue; 3];
 
 const MIN_WL: WavelengthValue = 380e-9;
 const MAX_WL: WavelengthValue = 750e-9;
-//const WL_STEP: WavelengthValue = 10e-9;
 const WLS_COUNT: usize = (750 - 380) / 5 + 1;
 
 type Spectrum = [IntensityValue; WLS_COUNT];
@@ -21,6 +19,65 @@ fn index_to_wl(i: WavelengthIndex) -> WavelengthValue {
 }
 
 const EPS: PositionValue = 1e-4;
+
+#[derive(Clone, Copy, Debug)]
+struct RGBColor {
+    data: [IntensityValue; 3],
+}
+
+impl RGBColor {
+    fn new(r: IntensityValue, g: IntensityValue, b: IntensityValue) -> Self {
+        Self {
+            data: [ r, g, b ]
+        }
+    }
+
+    fn black() -> Self {
+        Self::new(0.0, 0.0, 0.0)
+    }
+
+    fn gray(v: IntensityValue) -> Self {
+        Self::new(v, v, v)
+    }
+}
+
+impl ops::Add<RGBColor> for RGBColor {
+    type Output = Self;
+
+    fn add(mut self, other: Self) -> RGBColor {
+        for i in 0..3 {
+            self.data[i] += other.data[i]
+        }
+        self
+    }
+}
+
+impl ops::Mul<PositionValue> for RGBColor {
+    type Output = Self;
+
+    fn mul(mut self, c: PositionValue) -> Self {
+        self.data.iter_mut().for_each(|d| *d *= c);
+        self
+    }
+}
+
+impl ops::Mul<RGBColor> for PositionValue {
+    type Output = RGBColor;
+
+    fn mul(self, v: RGBColor) -> RGBColor {
+        v * self
+    }
+}
+
+impl std::iter::Sum for RGBColor {
+    fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut total = RGBColor { data: [0.0; 3] };
+        for v in iter {
+            total = total + v;
+        }
+        total
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Vec3 {
@@ -58,12 +115,15 @@ impl Vec3 {
         }
     }
 
-    fn length(&self) -> PositionValue {
+    fn length_sqr(&self) -> PositionValue {
         self.data
             .iter()
             .map(|&a| a * a)
             .sum::<PositionValue>()
-            .sqrt()
+    }
+
+    fn length(&self) -> PositionValue {
+        self.length_sqr().sqrt()
     }
 
     fn normalize(&mut self) {
@@ -182,6 +242,7 @@ impl Mat3 {
     }
 }
 
+// TODO add sample count per cell as an argument
 // r1 and r2 should be normalized and either both 'to' or both 'from' the hit point
 fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthValue, rad: PositionValue) -> IntensityValue {
     let bl1 = b1.length();
@@ -193,9 +254,6 @@ fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthV
     let dot2 = b2.dot(&(r1 + r2));
     
     let mut count = 1;
-
-    // TODO: due to symmetry (+/-), the wave is always real;
-    // so we can only compute cos instead of cis
 
     // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
     let mut wave = Complex::<IntensityValue>::new(1.0, 0.0);
@@ -225,9 +283,6 @@ fn diffraction_intensity(b1: Vec3, b2: Vec3, r1: Vec3, r2: Vec3, wl: WavelengthV
     let i1 = (wave / count as IntensityValue).norm_sqr();
     
     let mut count2 = 1;
-
-    // TODO: due to symmetry (+/-), the wave is always real;
-    // so we can only compute cos instead of cis
 
     // 1.0 + 0.0 * i for the point at origin (exp(i * <0, rr>))
     let mut wave2 = Complex::<IntensityValue>::new(0.0, 0.0);
@@ -273,7 +328,6 @@ impl Ray {
 struct TracedRay {
     ray: Ray,
     ttl: i32,
-    wli: WavelengthIndex,
 }
 
 #[derive(Debug)]
@@ -282,6 +336,7 @@ struct ShadowCheckRay {
     light_t: PositionValue,
 }
 
+/*
 struct Triangle<'a> {
     verts: [(Vec3, Vec3); 3], // array 3 of (position, normal)
     struct_center: Vec3,
@@ -340,163 +395,124 @@ impl<'a> Triangle<'a> {
         }
     }
 }
+*/
 
-// TODO: if performance bad, devirtualize by "going the lookup myself" (have a fixed list of
-// materials and a big if-else)
-trait Material {
-    fn hit(
-        &self,
-        tri: &Triangle,
-        hit_pos: &Vec3,
-        tr: &TracedRay,
-        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
-        scene: &dyn Tracer,
-    ) -> IntensityValue;
+trait IntersectedObject {
+    fn shade(&self, scene: &dyn Tracer, receptor: &dyn LightReceptor, in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>, ray_ttl: i32) -> RGBColor;
 }
 
-struct MatteMaterial {
-    color: Spectrum,
+trait Object {
+    fn simple_intersect(&self, ray: &Ray) -> Option<PositionValue>;
+    fn intersect(&self, ray: &Ray) -> Option<(PositionValue, Box<dyn IntersectedObject + '_>)>;
 }
 
-impl Material for MatteMaterial {
-    fn hit(
-        &self,
-        tri: &Triangle,
-        hit_pos: &Vec3,
-        tr: &TracedRay,
-        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
-        _scene: &dyn Tracer,
-    ) -> IntensityValue {
-        let n = tri.normal_at_pos(hit_pos);
-        let total_light: IntensityValue = in_lights
-            .filter_map(|(dir, int)| {
-                let dot = dir.dot(&n);
-                if dot > 0.0 {
-                    Some(dot * int)
-                } else {
-                    None
-                }
-            })
-            .sum();
-        let res = self.color[tr.wli] * total_light;
-        //println!("matte: {res}");
-        res
-    }
-}
+struct CompactDiscObj {
+    // geometry
+    center: Vec3,
+    normal: Vec3,
+    r_inner: PositionValue,
+    r_outer: PositionValue,
 
-struct MirrorMaterial {
-    shininess: IntensityValue,
+    // for vanilla specular shading
     diffusivity: IntensityValue,
-    absorbtion: IntensityValue,
-}
-
-impl Material for MirrorMaterial {
-    fn hit(
-        &self,
-        tri: &Triangle,
-        hit_pos: &Vec3,
-        tr: &TracedRay,
-        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
-        scene: &dyn Tracer,
-    ) -> IntensityValue {
-        let n = tri.normal_at_pos(hit_pos);
-        let total_light: IntensityValue = in_lights
-            .filter_map(|(dir, int)| {
-                let dot = dir.dot(&n);
-                println!("some light");
-                if dot > 0.0 {
-                    println!("correct light");
-                    let h = (dir - tr.ray.dir).normalized();
-                    Some(int * n.dot(&h).powf(self.shininess))
-                } else {
-                    None
-                }
-            })
-            .sum();
-        let secondary_intensity = if tr.ttl > 0 {
-            let new_dir = tr.ray.dir - 2.0 * tr.ray.dir.dot(&n) * n;// - tr.ray.dir;
-            scene.trace(&TracedRay {
-                ray: Ray {
-                    origin: *hit_pos + EPS * new_dir,
-                    dir: new_dir,
-                },
-                ttl: tr.ttl - 1,
-                wli: tr.wli,
-            })
-        } else {
-            0.0
-        };
-        dbg!(total_light);
-        dbg!(secondary_intensity);
-        let res =
-        self.diffusivity * total_light + (1.0 - self.absorbtion) * secondary_intensity;
-        println!("mirror {res}");
-        res
-    }
-}
-
-struct DiffractiveMaterial {
     shininess: IntensityValue,
-    diffusivity: IntensityValue,
+
+    // for reflection shading
     absorbtion: IntensityValue,
+
+    // for diffraction shading
+    diffraction_factor: IntensityValue,
     d_rad: PositionValue,
     d_perp: PositionValue,
+    intg_rad: PositionValue,
+    intg_samples_per_cell: u32,
 }
 
-impl Material for DiffractiveMaterial {
-    fn hit(
-        &self,
-        tri: &Triangle,
-        hit_pos: &Vec3,
-        tr: &TracedRay,
-        in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>,
-        scene: &dyn Tracer,
-    ) -> IntensityValue {
-        let n = tri.normal_at_pos(hit_pos);
-        let b1 = (*hit_pos - tri.struct_center).normalized() * self.d_rad;
-        let b2 = n.cross(&(*hit_pos - tri.struct_center)).normalized() * self.d_perp;
-        let total_light: IntensityValue = in_lights
+impl CompactDiscObj {
+    fn intersect_disc_plane(&self, ray: &Ray) -> (PositionValue, Vec3) {
+        let t = self.normal.dot(&(self.center - ray.origin)) / self.normal.dot(&ray.dir);
+        (t, ray.at(t))
+    }
+}
+
+struct IntersectedCompactDiscObj<'a> {
+    obj: &'a CompactDiscObj,
+    hit_pos: Vec3,
+    in_dir: Vec3,
+}
+
+impl Object for CompactDiscObj {
+    fn simple_intersect(&self, ray: &Ray) -> Option<PositionValue> {
+        let (t, hit_pos) = self.intersect_disc_plane(ray);
+        let r_sqr = (hit_pos - self.center).length_sqr();
+        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer {
+            Some(t)
+        } else {
+            None
+        }
+    }
+
+    fn intersect(&self, ray: &Ray) -> Option<(PositionValue, Box<dyn IntersectedObject + '_>)> {
+        let (t, hit_pos) = self.intersect_disc_plane(ray);
+        let r_sqr = (hit_pos - self.center).length_sqr();
+        if t >= 0.0 && self.r_inner * self.r_inner <= r_sqr && r_sqr <= self.r_outer * self.r_outer {
+            Some((t, Box::new(IntersectedCompactDiscObj {
+                obj: self,
+                hit_pos,
+                in_dir: ray.dir,
+            })))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> IntersectedObject for IntersectedCompactDiscObj<'a> {
+    fn shade(&self, tracer: &dyn Tracer, receptor: &dyn LightReceptor, in_lights: &mut dyn Iterator<Item = (Vec3, IntensityValue)>, ray_ttl: i32) -> RGBColor {
+
+        let refl_color = if ray_ttl > 0 {
+            let out_dir = self.in_dir - 2.0 * self.obj.normal.dot(&self.in_dir) * self.obj.normal;
+            (1.0 - self.obj.absorbtion) * tracer.trace(&TracedRay {
+                ray: Ray {
+                    dir: out_dir,
+                    origin: self.hit_pos + EPS * out_dir
+                },
+                ttl: ray_ttl - 1
+            })
+        } else {
+            RGBColor::black()
+        };
+
+        // for diffraction
+        let r = self.hit_pos - self.obj.center;
+        let b1 = self.obj.d_rad * r.normalized();
+        let b2 = self.obj.d_perp * self.obj.normal.cross(&r).normalized();
+
+        let own_color: RGBColor = in_lights
             .filter_map(|(dir, int)| {
-                let dot = dir.dot(&n);
-                //println!("some light");
-                if dot > 0.0 {
-                    //println!("correct light");
-                    Some(11100.0 * int * diffraction_intensity(b1, b2, dir, -tr.ray.dir, index_to_wl(tr.wli), 100.0e-6))
-                    /*
-                    let a_cos1 = dir.dot(&n);
-                    let a_cos2_2 = (1.0 - (1.0 - cos1 * cos1).sqrt() + index_to_wl(tr.wli) / self.d).pow(2.0);
-                    let h = (dir - tr.ray.dir).normalized();
-                    Some(int * n.dot(&h).powf(self.shininess))
-                    */
+                let n_dot = dir.dot(&self.obj.normal);
+                if n_dot > 0.0 {
+                    let h = (dir - self.in_dir).normalized();
+                    let diffu = self.obj.diffusivity * RGBColor::gray(self.obj.normal.dot(&h).powf(self.obj.shininess));
+                    let spectrum = (0..WLS_COUNT).map(|wli| {
+                        let wl = index_to_wl(wli);
+                        // TODO add the number of samples parameter
+                        diffraction_intensity(b1, b2, dir, -self.in_dir, wl, self.obj.intg_rad)
+                    }).collect::<Vec<_>>().try_into().unwrap();
+                    let diffra = self.obj.diffraction_factor * receptor.process(&spectrum);
+                    Some(int * (diffu + diffra))
                 } else {
                     None
                 }
             })
             .sum();
-        let secondary_intensity = if tr.ttl > 0 {
-            let new_dir = tr.ray.dir - 2.0 * tr.ray.dir.dot(&n) * n;// - tr.ray.dir;
-            scene.trace(&TracedRay {
-                ray: Ray {
-                    origin: *hit_pos + EPS * new_dir,
-                    dir: new_dir,
-                },
-                ttl: tr.ttl - 1,
-                wli: tr.wli,
-            })
-        } else {
-            0.0
-        };
-        //dbg!(total_light);
-        //dbg!(secondary_intensity);
-        let res =
-        self.diffusivity * total_light + (1.0 - self.absorbtion) * secondary_intensity;
-        //println!("mirror {res}");
-        res
+
+        own_color + refl_color
     }
 }
 
 trait Tracer {
-    fn trace(&self, tr: &TracedRay) -> IntensityValue;
+    fn trace(&self, tr: &TracedRay) -> RGBColor;
 }
 
 trait Light {
@@ -530,14 +546,14 @@ struct PointLight {
 }
 */
 
-struct Scene<'a> {
-    triangles: Vec<Triangle<'a>>,
+struct Scene {
+    objects: Vec<Box<dyn Object>>,
     lights: Vec<Box<dyn Light>>,
 }
 
-impl<'a> Scene<'a> {
+impl Scene {
     fn is_obstructed(&self, scr: &ShadowCheckRay) -> bool {
-        self.triangles.iter().any(|t| match t.intersect(&scr.ray) {
+        self.objects.iter().any(|obj| match obj.simple_intersect(&scr.ray) {
             Some(t) => t <= scr.light_t,
             None => false,
         })
@@ -545,19 +561,21 @@ impl<'a> Scene<'a> {
 }
 
 struct RTTracer<'a> {
-    scene: &'a Scene<'a>
+    scene: &'a Scene,
+    receptor: &'a dyn LightReceptor,
 }
 
 impl Tracer for RTTracer<'_> {
-    fn trace(&self, tr: &TracedRay) -> IntensityValue {
+    fn trace(&self, tr: &TracedRay) -> RGBColor {
         let mut closest_t = f32::INFINITY;
-        let mut closest = None;
-        for tri in &self.scene.triangles {
-            match tri.intersect(&tr.ray) {
-                Some(t) => {
+        let mut closest: Option<Box<dyn IntersectedObject>> = None;
+
+        for obj in &self.scene.objects {
+            match obj.intersect(&tr.ray) {
+                Some((t, iobj)) => {
                     if t < closest_t {
                         closest_t = t;
-                        closest = Some(tri)
+                        closest = Some(iobj)
                     }
                 }
                 None => {}
@@ -565,7 +583,7 @@ impl Tracer for RTTracer<'_> {
         }
 
         match closest {
-            Some(tri) => {
+            Some(iobj) => {
 
                 let hit_pos = tr.ray.at(closest_t);
 
@@ -578,20 +596,14 @@ impl Tracer for RTTracer<'_> {
                         }
                     })
                 });
-                let res =
-                tri.material
-                    .hit(tri, &hit_pos, tr, &mut in_lights, self);
-                //println!("mat hit {res}");
-                res
+                iobj.shade(self, self.receptor, &mut in_lights, tr.ttl)
             }
-            None => {
-                //println!("miss");
-                0.0
-            }
+            None => RGBColor::black()
         }
     }
 }
 
+/*
 struct BoolTracer<'a> {
     scene: &'a Scene<'a>
 }
@@ -609,7 +621,7 @@ impl Tracer for BoolTracer<'_> {
         0.0
     }
 }
-
+*/
 
 struct RawImage {
     pixels: Vec<RGBColor>,
@@ -628,24 +640,26 @@ struct RTLightReceptor {
 
 impl LightReceptor for RTLightReceptor {
     fn process(&self, spectrum: &Spectrum) -> RGBColor {
-        let rescolor = (0..3)
-            .map(|i| {
-                self.receptors[i]
-                    .iter()
-                    .zip(spectrum.iter())
-                    .map(|(&rec, &sig)| rec * sig)
-                    .sum::<IntensityValue>()
-                    * self.factor
-            })
+        let rescolor = RGBColor {
+            data: (0..3)
+                .map(|i| {
+                    self.receptors[i]
+                        .iter()
+                        .zip(spectrum.iter())
+                        .map(|(&rec, &sig)| rec * sig)
+                        .sum::<IntensityValue>()
+                        * self.factor
+                })
             .collect::<Vec<_>>()
-            .try_into()
-            .unwrap();
+                .try_into()
+                .unwrap()
+        };
         rescolor
     }
 }
 
 trait Camera {
-    fn render(&self, scene: &dyn Tracer, receptor: &dyn LightReceptor) -> RawImage;
+    fn render(&self, tracer: &dyn Tracer) -> RawImage;
 }
 
 struct RTCamera {
@@ -664,9 +678,8 @@ struct RTCamera {
 }
 
 impl Camera for RTCamera {
-    fn render(&self, scene: &dyn Tracer, receptor: &dyn LightReceptor) -> RawImage {
-        let mut pixels = vec![ [ 0.0, 0.0, 0.0 ]; (self.pixel_w * self.pixel_h) as usize ];//selVec::new();
-        //pixels.reserve_exact((self.pixel_w * self.pixel_h) as usize);
+    fn render(&self, tracer: &dyn Tracer) -> RawImage {
+        let mut pixels = vec![ RGBColor::black(); (self.pixel_w * self.pixel_h) as usize ];
 
         for y in 0..self.pixel_h {
             for x in 0..self.pixel_w {
@@ -678,13 +691,7 @@ impl Camera for RTCamera {
                     origin: self.pos,
                     dir: (self.view_dir + coeff_u * self.proj_u + coeff_v * self.proj_v).normalized(),
                 };
-                let spectrum = (0..WLS_COUNT)
-                    .map(|wli| scene.trace(&TracedRay { ray, ttl: 1, wli }))
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap();
-
-                pixels[(y * self.pixel_h + x) as usize] = receptor.process(&spectrum);
+                pixels[(y * self.pixel_h + x) as usize] = tracer.trace(&TracedRay { ray, ttl: 1 })
             }
         }
 
@@ -704,12 +711,10 @@ struct RTImageWriter {}
 
 impl ImageWriter for RTImageWriter {
     fn write_image(image: RawImage, filename: &str) {
-        let bytes = image.pixels.iter().flat_map(|&rgb| rgb.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<_>>() ).collect::<Vec<_>>();
+        let bytes = image.pixels.iter().flat_map(|&rgb| rgb.data.iter().map(|&v| (v.clamp(0.0, 1.0) * 255.0).round() as u8).collect::<Vec<_>>() ).collect::<Vec<_>>();
         image::save_buffer(filename, bytes.as_slice(), image.width, image.height, image::ColorType::Rgb8).unwrap();
     }
 }
-
-use std::fs::read_to_string;
 
 fn load_light_receptor(filename: &str) -> RTLightReceptor {
     let rec_values = read_to_string(filename).unwrap().lines()
@@ -728,86 +733,35 @@ fn load_light_receptor(filename: &str) -> RTLightReceptor {
     }
 }
 
-fn construct_materials() -> Vec<Box<dyn Material>> {
-    let reddish: Spectrum = (0..WLS_COUNT).map(|wli| if wli > WLS_COUNT * 4 / 5 { 1.0 } else { 0.0 }).collect::<Vec<_>>().try_into().unwrap();
-    let reddish_mat = Box::new(MatteMaterial {
-        color: reddish
-    });
-    let mirror_mat = Box::new(MirrorMaterial {
-        shininess: 6.0,
-        diffusivity: 0.01,
-        absorbtion: 0.2
-    });
-    let cd_mat = Box::new(DiffractiveMaterial {
-        shininess: 6.0,
-        diffusivity: 0.01,
-        absorbtion: 0.2,
-        d_rad: 1.5e-6,
-        d_perp: 3.0e-6,
-    });
-    vec![ reddish_mat, mirror_mat, cd_mat ]
-}
-
-fn construct_scene0<'a>(materials: &'a Vec<Box<dyn Material>>) -> Scene<'a> {
-    let red_tri = Triangle {
-        verts: [ (Vec3::new(0.0, -0.5, 1.0), Vec3::new(0.0, 1.0, -1.0).normalized()),
-        (Vec3::new(-0.5, 0.5, 2.0), Vec3::new(0.0, 1.0, -1.0).normalized()),
-        (Vec3::new(0.5, 0.5, 2.0), Vec3::new(0.0, 1.0, -1.0).normalized()) ],
-        struct_center: Vec3::zero(),
-        material: &*materials[0]//&*reddish_mat
-    };
-    let mirror_tri = Triangle {
-        verts: [ (Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 1.0, -1.0).normalized()),
-        (Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 1.0, -1.0).normalized()),
-        (Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 1.0, -1.0).normalized()) ],
-        struct_center: Vec3::zero(),
-        material: &*materials[1]//mirror_mat
+fn construct_scene() -> Scene {
+    let cd = CompactDiscObj {
+        center: Vec3::zero(),
+        normal: Vec3::new(0.85, -0.2, -1.0),
+        r_inner: 0.2,
+        r_outer: 1.0,
+        diffusivity: 0.1,
+        shininess: 5.0,
+        absorbtion: 0.1,
+        diffraction_factor: 0.5,
+        d_rad: 1.5e-6 * 2.0,
+        d_perp: 3.0e-6 * 2.0,
+        intg_rad: 50.0e-6,
+        intg_samples_per_cell: 1,
     };
     let main_light = DirectionalLight {
         dir: Vec3::new(0.3, -0.2, 4.0).normalized(),
         intensity: 1.0,
     };
     Scene {
-        triangles: vec![ red_tri, mirror_tri ],
-        lights: vec![ Box::new(main_light) ]
+        objects: vec! [ Box::new(cd) ],
+        lights: vec! [ Box::new(main_light) ],
     }
 }
 
-fn construct_scene1<'a>(materials: &'a Vec<Box<dyn Material>>) -> Scene<'a> {
-    let red_tri = Triangle {
-        verts: [ (Vec3::new(0.0, 0.5, 1.0), Vec3::new(1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(-1.0, 0.5, 0.0), Vec3::new(1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(-0.5, -0.5, 0.5), Vec3::new(1.0, 0.0, -1.0).normalized()) ],
-        struct_center: Vec3::zero(),
-        material: &*materials[0]//&*reddish_mat
-    };
-    let mirror_tri0 = Triangle {
-        verts: [ (Vec3::new(0.0, 2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(0.0, -2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(2.0, 2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()) ],
-        struct_center: Vec3::new(1.0, 0.0, 0.0),
-        material: &*materials[2]//mirror_mat
-    };
-    let mirror_tri1 = Triangle {
-        verts: [ (Vec3::new(0.0, -2.0, 1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(2.0, 2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()),
-        (Vec3::new(2.0, -2.0, -1.0), Vec3::new(-1.0, 0.0, -1.0).normalized()) ],
-        struct_center: Vec3::new(1.0, 0.0, 0.0),
-        material: &*materials[2]//mirror_mat
-    };
-    let main_light = DirectionalLight {
-        dir: Vec3::new(0.0, -0.0, 4.0).normalized(),
-        intensity: 1.0,
-    };
-    Scene {
-        triangles: vec![ red_tri, mirror_tri0, mirror_tri1 ],
-        lights: vec![ Box::new(main_light) ]
-    }
-}
-
-fn construct_tracer<'a>(scene: &'a Scene) -> Box::<dyn Tracer + 'a> {
+fn construct_tracer<'a>(scene: &'a Scene, receptor: &'a dyn LightReceptor) -> Box::<dyn Tracer + 'a> {
     Box::new(RTTracer {
-        scene
+        scene,
+        receptor
     })
 }
 
@@ -826,15 +780,9 @@ fn construct_camera() -> RTCamera {
 
 fn main() {
     let receptor = load_light_receptor("receptor.csv");
-    let materials = construct_materials();
-    let scene = construct_scene1(&materials);
-    let tracer = construct_tracer(&scene);
+    let scene = construct_scene();
+    let tracer = construct_tracer(&scene, &receptor);
     let camera = construct_camera();
-    let image = camera.render(tracer.as_ref(), &receptor);
+    let image = camera.render(tracer.as_ref());
     RTImageWriter::write_image(image, "out.png");
 }
-
-// TODO: make performance improvements to render a larger image e.g.
-// -- don't render all wavelengths when the ray doesn't hit anything
-// -- add fast-paths for rays not hitting objects
-// -- compile in release
