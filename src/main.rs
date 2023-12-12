@@ -504,6 +504,9 @@ struct CompactDiscObj {
     d_perp: PositionValue,
     intg_rad: PositionValue,
     intg_samples_per_cell: u32,
+
+    // for ambient shading
+    ambient: IntensityValue,
 }
 
 impl CompactDiscObj {
@@ -579,8 +582,9 @@ impl<'a> IntersectedObject for IntersectedCompactDiscObj<'a> {
 
         let own_color: RGBColor = in_lights
             .filter_map(|(dir, int)| {
-                let n_dot = dir.dot(&self.obj.normal);
-                if n_dot > 0.0 {
+                let light_dot_n = self.obj.normal.dot(&dir);
+                let eye_dot_n = self.obj.normal.dot(&-self.in_dir);
+                if light_dot_n * eye_dot_n > 0.0 {
                     let h = (dir - self.in_dir).normalized();
                     let diffu = self.obj.diffusivity
                         * RGBColor::gray(self.obj.normal.dot(&h).powf(self.obj.shininess));
@@ -601,7 +605,7 @@ impl<'a> IntersectedObject for IntersectedCompactDiscObj<'a> {
             })
             .sum();
 
-        own_color + refl_color
+        own_color + refl_color + RGBColor::gray(self.obj.ambient)
     }
 }
 
@@ -857,32 +861,35 @@ fn load_light_receptor(filename: &str) -> RTLightReceptor {
 fn construct_scene<'a>(bunny_mesh: &'a Mesh) -> Scene {
     let cd1 = CompactDiscObj {
         center: Vec3::new(-0.6, 0.0, 0.0),
-        normal: Vec3::new(1.0, 0.0, -1.0),
+        normal: Vec3::new(1.0, 0.0, -1.0).normalized(),
         r_inner: 0.2,
         r_outer: 0.7,
-        diffusivity: 0.1,
-        shininess: 5.0,
-        absorbtion: 0.1,
-        diffraction_factor: 0.5,
+        ambient: 0.03,
+        diffusivity: 0.8,
+        shininess: 3.0,
+        absorbtion: 0.5,
+        diffraction_factor: 0.8,
         d_rad: 1.5e-6 * 2.0,
         d_perp: 3.0e-6 * 2.0,
-        intg_rad: 50.0e-6,
+        intg_rad: 70.0e-6,
         intg_samples_per_cell: 1,
     };
     let cd2 = CompactDiscObj {
         center: Vec3::new(0.6, 0.0, 0.0),
-        normal: Vec3::new(-1.0, 0.0, -1.0),
+        normal: Vec3::new(-1.0, 0.0, -1.0).normalized(),
         r_inner: 0.2,
         r_outer: 0.7,
-        diffusivity: 0.1,
-        shininess: 5.0,
-        absorbtion: 0.1,
-        diffraction_factor: 0.5,
+        ambient: 0.03,
+        diffusivity: 0.8,
+        shininess: 3.0,
+        absorbtion: 0.5,
+        diffraction_factor: 0.8,
         d_rad: 1.5e-6 * 2.0,
         d_perp: 3.0e-6 * 2.0,
-        intg_rad: 50.0e-6,
+        intg_rad: 70.0e-6,
         intg_samples_per_cell: 1,
     };
+    /*
     let bunny = MeshObj {
         mesh: bunny_mesh,
         mesh_aabb: bunny_mesh.aabb(),
@@ -891,12 +898,13 @@ fn construct_scene<'a>(bunny_mesh: &'a Mesh) -> Scene {
         ambient_color: RGBColor::new(0.09, 0.02, 0.02),
         diffuse_color: RGBColor::new(0.9, 0.2, 0.2),
     };
+    */
     let main_light = DirectionalLight {
-        dir: Vec3::new(0.3, -0.2, 4.0).normalized(),
+        dir: Vec3::new(0.3, -1.1, 4.0).normalized(),
         intensity: 1.0,
     };
     Scene {
-        objects: vec![Box::new(cd1), Box::new(cd2), Box::new(bunny)],
+        objects: vec![Box::new(cd1), Box::new(cd2)/*, Box::new(bunny)*/],
         lights: vec![Box::new(main_light)],
     }
 }
@@ -905,16 +913,19 @@ fn construct_tracer<'a>(scene: &'a Scene, receptor: &'a dyn LightReceptor) -> Bo
     Box::new(RTTracer { scene, receptor })
 }
 
-fn construct_camera() -> RTCamera {
+// t should go 0 to 1
+fn construct_camera(t: PositionValue) -> RTCamera {
+    let angle = (t - 0.5) * std::f32::consts::PI;
+    let dist = 6.0;
     RTCamera {
-        pos: Vec3::new(0.0, 0.0, -6.0),
-        view_dir: Vec3::new(0.0, 0.0, 1.0),
-        proj_u: Vec3::new(1.0, 0.0, 0.0),
+        pos: Vec3::new(dist * angle.sin(), 0.0, -dist * angle.cos()),
+        view_dir: Vec3::new(-angle.sin(), 0.0, angle.cos()),
+        proj_u: Vec3::new(angle.cos(), 0.0, angle.sin()),
         proj_v: Vec3::new(0.0, -1.0, 0.0),
         proj_w: 0.4,
         proj_h: 0.4,
-        pixel_w: 1024,
-        pixel_h: 1024,
+        pixel_w: 256,
+        pixel_h: 256,
     }
 }
 
@@ -1121,12 +1132,39 @@ impl<'a> IntersectedObject for IntersectedMeshObj<'a> {
     }
 }
 
+use std::thread;
+
 fn main() {
-    let receptor = load_light_receptor("receptor.csv");
-    let bunny_mesh = load_ply("../../bun_zipper_res3.ply", true);
-    let scene = construct_scene(&bunny_mesh);
-    let tracer = construct_tracer(&scene, &receptor);
-    let camera = construct_camera();
-    let image = camera.render(tracer.as_ref());
-    RTImageWriter::write_image(image, "out.png");
+
+    let frame_count = 40;
+    let workers = 20;
+    /*
+    let draw_i = |i: i32| {
+        let camera = construct_camera((i as f32 + 0.5) / frame_count as f32);
+        let image = camera.render(tracer.as_ref());
+        RTImageWriter::write_image(image, format!("out{}.png", i).as_str());
+    };
+    */
+
+    let handles = (0..workers).map(|w| {
+        thread::spawn(move || {
+        let receptor = load_light_receptor("receptor.csv");
+        let bunny_mesh = load_ply("../../bun_zipper_res3.ply", true);
+        let scene = construct_scene(&bunny_mesh);
+        let tracer = construct_tracer(&scene, &receptor);
+        let mut i = w;
+        while i < frame_count {
+            let camera = construct_camera((i as f32 + 0.5) / frame_count as f32);
+            let image = camera.render(tracer.as_ref());
+            RTImageWriter::write_image(image, format!("out{}.png", i).as_str());
+            i += workers;
+        }
+        })
+    }).collect::<Vec<_>>();
+    handles.into_iter().for_each(|h| { let _ = h.join(); });
+    /*
+    for i in 0..frame_count {
+        thread::spawn
+    }
+    */
 }
