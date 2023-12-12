@@ -87,6 +87,10 @@ impl Vec3 {
         Self { data: [x, y, z] }
     }
 
+    const fn new_uniform(v: PositionValue) -> Self {
+        Self::new(v, v, v)
+    }
+
     const fn zero() -> Self {
         Self { data: [0.0; 3] }
     }
@@ -128,6 +132,20 @@ impl Vec3 {
         let mut v = *self;
         v.normalize();
         v
+    }
+
+    // component-wise min
+    fn cw_min(&self, other: &Self) -> Self {
+        Vec3 {
+            data: self.data.iter().zip(other.data.iter()).map(|(&v1, &v2)| v1.min(v2)).collect::<Vec<_>>().try_into().unwrap()
+        }
+    }
+
+    // component-wise max
+    fn cw_max(&self, other: &Self) -> Self {
+        Vec3 {
+            data: self.data.iter().zip(other.data.iter()).map(|(&v1, &v2)| v1.max(v2)).collect::<Vec<_>>().try_into().unwrap()
+        }
     }
 }
 
@@ -365,6 +383,16 @@ struct Ray {
 impl Ray {
     fn at(&self, t: PositionValue) -> Vec3 {
         self.origin + t * self.dir
+    }
+
+    // express ray in a coordinate system (') for which
+    // X = linmap * X' + translation
+    // dir of the produced ray might not be normalized
+    fn transform_into(&self, translation: &Vec3, linmap: &Mat3) -> Self {
+        Ray {
+            origin: linmap.solve(&(self.origin - *translation)),
+            dir: linmap.solve(&self.dir),
+        }
     }
 }
 
@@ -750,7 +778,7 @@ impl Camera for RTCamera {
                     dir: (self.view_dir + coeff_u * self.proj_u + coeff_v * self.proj_v)
                         .normalized(),
                 };
-                pixels[(y * self.pixel_h + x) as usize] = tracer.trace(&TracedRay { ray, ttl: 1 })
+                pixels[(y * self.pixel_h + x) as usize] = tracer.trace(&TracedRay { ray, ttl: 2 })
             }
         }
 
@@ -857,9 +885,11 @@ fn construct_scene<'a>(bunny_mesh: &'a Mesh) -> Scene {
     };
     let bunny = MeshObj {
         mesh: bunny_mesh,
-        pos: Vec3::new(0.0, 0.01, 0.0),
-        linmap: Mat3::id(),
-        color: RGBColor::new(0.9, 0.2, 0.2),
+        mesh_aabb: bunny_mesh.aabb(),
+        pos: Vec3::new(-0.01234, 0.01876, -0.5),
+        linmap: 4.0 * Mat3::id(),
+        ambient_color: RGBColor::new(0.09, 0.02, 0.02),
+        diffuse_color: RGBColor::new(0.9, 0.2, 0.2),
     };
     let main_light = DirectionalLight {
         dir: Vec3::new(0.3, -0.2, 4.0).normalized(),
@@ -883,8 +913,8 @@ fn construct_camera() -> RTCamera {
         proj_v: Vec3::new(0.0, -1.0, 0.0),
         proj_w: 0.4,
         proj_h: 0.4,
-        pixel_w: 128,
-        pixel_h: 128,
+        pixel_w: 1024,
+        pixel_h: 1024,
     }
 }
 
@@ -898,7 +928,7 @@ struct Mesh {
     faces: Vec<[ u32; 3 ]>
 }
 
-fn load_ply(filename: &str) -> Mesh {
+fn load_ply(filename: &str, center: bool) -> Mesh {
     let content = read_to_string(filename).unwrap();
     let lines = content.lines();
     let mut vcount_lines = lines.skip_while(|s| !s.starts_with("element vertex "));
@@ -907,12 +937,21 @@ fn load_ply(filename: &str) -> Mesh {
     let fcount = fcount_lines.next().unwrap()["element face ".len()..].parse::<usize>().unwrap();
     let mut data_lines = fcount_lines.skip_while(|s| !s.starts_with("end_header")).skip(1);
 
-    let vert_pos = (0..vcount).map(|_| {
+    let pre_vert_pos = (0..vcount).map(|_| {
         let s = data_lines.next().unwrap();
         Vec3 {
             data: s.split(' ').take(3).map(|num_s| num_s.parse::<PositionValue>().unwrap()).collect::<Vec<_>>().try_into().unwrap()
         }
     }).collect::<Vec<_>>();
+
+    let vert_pos = if center {
+        let mins = pre_vert_pos.iter().fold(Vec3::new_uniform(PositionValue::INFINITY), |state, pos| state.cw_min(&pos));
+        let maxs = pre_vert_pos.iter().fold(Vec3::new_uniform(PositionValue::NEG_INFINITY), |state, pos| state.cw_max(&pos));
+        let mids = 0.5 * (mins + maxs);
+        pre_vert_pos.into_iter().map(|pos| pos - mids).collect::<Vec<_>>()
+    } else {
+        pre_vert_pos
+    };
 
     let faces = (0..fcount).map(|_| {
         let s = data_lines.next().unwrap();
@@ -936,24 +975,70 @@ fn load_ply(filename: &str) -> Mesh {
 
 struct MeshObj<'a> {
     mesh: &'a Mesh,
+    mesh_aabb: AABB,
     pos: Vec3,
     linmap: Mat3,
-    color: RGBColor,
+    ambient_color: RGBColor,
+    diffuse_color: RGBColor,
+}
+
+impl<'a> MeshObj<'a> {
+    fn ray_to_local(&self, ray: &Ray) -> Ray {
+        ray.transform_into(&self.pos, &self.linmap)
+    }
+
+    fn maybe_intersects(&self, local_ray: &Ray) -> bool {
+        // check if rays hits the bounding box
+        let t_maxmin = (0..3).map(|i| {
+            let ray_compo = local_ray.dir.data[i];
+            PositionValue::min(
+                (self.mesh_aabb.mins.data[i] - local_ray.origin.data[i]) / ray_compo, 
+                (self.mesh_aabb.maxs.data[i] - local_ray.origin.data[i]) / ray_compo 
+                )
+        }).fold(PositionValue::NEG_INFINITY, |state, v| state.max(v));
+        let t_minmax = (0..3).map(|i| {
+            let ray_compo = local_ray.dir.data[i];
+            PositionValue::max(
+                (self.mesh_aabb.mins.data[i] - local_ray.origin.data[i]) / ray_compo, 
+                (self.mesh_aabb.maxs.data[i] - local_ray.origin.data[i]) / ray_compo 
+                )
+        }).fold(PositionValue::INFINITY, |state, v| state.min(v));
+        t_maxmin <= t_minmax
+    }
+}
+
+#[derive(Debug)]
+struct AABB {
+    mins: Vec3,
+    maxs: Vec3,
+}
+
+impl Mesh {
+    fn aabb(&self) -> AABB {
+        AABB {
+            mins: self.vertices.iter().fold(Vec3::new_uniform(PositionValue::INFINITY), |state, vert| state.cw_min(&vert.pos)),
+            maxs: self.vertices.iter().fold(Vec3::new_uniform(PositionValue::NEG_INFINITY), |state, vert| state.cw_max(&vert.pos)),
+        }
+    }
 }
 
 impl<'a> Object for MeshObj<'a> {
     fn simple_intersect(&self, ray: &Ray) -> Option<PositionValue> {
-        //let origin2 = self.linmap.solve(&(ray.origin - self.pos));
-        let dir2 = self.linmap.solve(&ray.dir);
+        let local_ray = self.ray_to_local(ray);
+
+        if !self.maybe_intersects(&local_ray) {
+            return None;
+        }
+
         let mut closest_t = PositionValue::INFINITY;
         for f in &self.mesh.faces {
             let tri: [Vec3; 3] = (0..3).map(|i| self.mesh.vertices[f[i] as usize].pos).collect::<Vec<_>>().try_into().unwrap();
             let n = (tri[1] - tri[0]).cross(&(tri[2] - tri[0]));
-            let t = n.dot(&(tri[0] - ray.origin + self.pos)) / n.dot(&dir2);
+            let t = n.dot(&(tri[0] - local_ray.origin)) / n.dot(&local_ray.dir);
             if t < 0.0 || t >= closest_t {
                 continue;
             }
-            let hit_pos = ray.at(t);
+            let hit_pos = local_ray.at(t);
             let vm = Mat3::from_columns(tri);
             let bary = vm.solve(&hit_pos);
             if bary.data[0] >= 0.0 && bary.data[1] >= 0.0 && bary.data[2] >= 0.0 {
@@ -968,8 +1053,12 @@ impl<'a> Object for MeshObj<'a> {
     }
 
     fn intersect(&self, ray: &Ray) -> Option<(PositionValue, Box<dyn IntersectedObject + '_>)> {
-        //let origin2 = self.linmap.solve(&(ray.origin - self.pos));
-        let dir2 = self.linmap.solve(&ray.dir);
+        let local_ray = self.ray_to_local(ray);
+
+        if !self.maybe_intersects(&local_ray) {
+            return None;
+        }
+
         let mut closest_t = PositionValue::INFINITY;
         let mut closest_face_i = 0;
         let mut closest_bary = Vec3::zero();
@@ -977,11 +1066,11 @@ impl<'a> Object for MeshObj<'a> {
             let f = self.mesh.faces[i];
             let tri: [Vec3; 3] = (0..3).map(|i| self.mesh.vertices[f[i] as usize].pos).collect::<Vec<_>>().try_into().unwrap();
             let n = (tri[1] - tri[0]).cross(&(tri[2] - tri[0]));
-            let t = n.dot(&(tri[0] - ray.origin + self.pos)) / n.dot(&dir2);
+            let t = n.dot(&(tri[0] - local_ray.origin)) / n.dot(&local_ray.dir);
             if t < 0.0 || t >= closest_t {
                 continue;
             }
-            let hit_pos = ray.at(t);
+            let hit_pos = local_ray.at(t);
             let vm = Mat3::from_columns(tri);
             let bary = vm.solve(&hit_pos);
             if bary.data[0] >= 0.0 && bary.data[1] >= 0.0 && bary.data[2] >= 0.0 {
@@ -1018,7 +1107,7 @@ impl<'a> IntersectedObject for IntersectedMeshObj<'a> {
     ) -> RGBColor {
         let mesh_space_n = self.obj.mesh.faces[self.face_i].iter().zip(self.bary.data.iter())
             .map(|(&vi, &bar)| bar * self.obj.mesh.vertices[vi as usize].normal).sum::<Vec3>().normalized();
-        let n = self.obj.linmap.transpose().solve(&mesh_space_n);
+        let n = self.obj.linmap.transpose().solve(&mesh_space_n).normalized();
         in_lights
             .filter_map(|(dir, int)| {
                 let n_dot = dir.dot(&n);
@@ -1028,13 +1117,13 @@ impl<'a> IntersectedObject for IntersectedMeshObj<'a> {
                     None
                 }
             })
-            .sum::<IntensityValue>() * self.obj.color
+            .sum::<IntensityValue>() * self.obj.diffuse_color + self.obj.ambient_color
     }
 }
 
 fn main() {
     let receptor = load_light_receptor("receptor.csv");
-    let bunny_mesh = load_ply("../../bun_zipper_res4.ply");
+    let bunny_mesh = load_ply("../../bun_zipper_res3.ply", true);
     let scene = construct_scene(&bunny_mesh);
     let tracer = construct_tracer(&scene, &receptor);
     let camera = construct_camera();
